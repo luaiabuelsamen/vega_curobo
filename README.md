@@ -112,7 +112,7 @@ vega_curobo/scene.py      MuJoCo scene, lights, camera, recording, physics mode
 vega_curobo/solvers.py    planner and MPC construction, goals, stepping, attachment
 vega_curobo/grasp.py      grasp poses from the measured jaw offset, feasibility search
 vega_curobo/control.py    geometric impedance control on SE(3)
-scripts/                  the four demos, plus config regeneration
+scripts/                  the five demos, the plot, config regeneration
 ```
 
 The active chain is `Lift`, `torso_flip`, `R_arm_j1..j7`, `R_gripper_j1`, with the
