@@ -24,8 +24,16 @@ def look_at(eye, target):
     return list(right) + list(np.cross(right, forward))
 
 
-def build_scene(marker_pos=(0.72, -0.15, 1.05), marker_rgba=(0.15, 0.8, 0.3, 0.9)):
-    """Compile the Vega with a ground plane, lights, a marker and a framed camera.
+#: One marker colour per hand, so a bimanual scene reads at a glance.
+MARKER_COLOURS = {"R_ee": (0.15, 0.80, 0.30, 0.9), "L_ee": (0.95, 0.55, 0.15, 0.9)}
+
+
+def build_scene(markers=None):
+    """Compile the Vega with a ground plane, lights, markers and a framed camera.
+
+    `markers` maps a name (use the tool frame) to a position; each becomes a
+    mocap body you can move with `set_marker`. Defaults to a single right-hand
+    marker.
 
     Kinematic only: gravity is off and the demos write joint angles straight into
     qpos, because what is being shown is the solver's output, not contact physics.
@@ -54,13 +62,23 @@ def build_scene(marker_pos=(0.72, -0.15, 1.05), marker_rgba=(0.15, 0.8, 0.3, 0.9
     world.add_geom(type=mujoco.mjtGeom.mjGEOM_PLANE, size=[3, 3, 0.05],
                    rgba=[0.82, 0.84, 0.87, 1], contype=0, conaffinity=0)
 
-    marker = world.add_body(name="marker", pos=list(marker_pos), mocap=True)
-    marker.add_geom(type=mujoco.mjtGeom.mjGEOM_SPHERE, size=[0.045, 0, 0],
-                    rgba=list(marker_rgba), contype=0, conaffinity=0)
+    if markers is None:
+        markers = {"R_ee": (0.72, -0.15, 1.05)}
+    for name, position in markers.items():
+        body = world.add_body(name=f"marker_{name}", pos=list(position), mocap=True)
+        body.add_geom(type=mujoco.mjtGeom.mjGEOM_SPHERE, size=[0.045, 0, 0],
+                      rgba=list(MARKER_COLOURS.get(name, (0.15, 0.8, 0.3, 0.9))),
+                      contype=0, conaffinity=0)
 
     eye = [1.9, -1.5, 1.55]
     world.add_camera(name="demo", pos=eye, fovy=50, xyaxes=look_at(eye, [0.35, -0.05, 1.05]))
     return spec.compile()
+
+
+def set_marker(model, data, name, position):
+    """Move one marker. Mocap bodies index into `mocap_pos` by mocapid, which is
+    not the body id."""
+    data.mocap_pos[model.body(f"marker_{name}").mocapid[0]] = position
 
 
 def joint_writer(model, data, joint_names):

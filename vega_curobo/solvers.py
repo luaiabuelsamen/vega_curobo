@@ -1,10 +1,12 @@
-"""The cuRobo side: build a planner or an MPC controller for the right arm.
+"""The cuRobo side: build a planner or an MPC controller for one or both arms.
 
 Both take the same robot config and the same floor obstacle. The split matters:
-`MotionPlanner` solves a whole trajectory in one shot (~12 s warm on a Jetson
-Orin) and `ModelPredictiveControl` refines a short action sequence every call
-(~0.3 s), so one is for planning a motion and the other is for following a goal
-that keeps moving.
+`MotionPlanner` solves a whole trajectory in one shot and
+`ModelPredictiveControl` refines a short action sequence every call, so one is
+for planning a motion and the other is for following a goal that keeps moving.
+
+Goals are dictionaries keyed by tool frame, so single-arm and bimanual use the
+same calls; the arm count only changes what you put in the dictionary.
 """
 import numpy as np
 import torch
@@ -13,26 +15,22 @@ from curobo.model_predictive_control import ModelPredictiveControl, ModelPredict
 from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
 from curobo.types import GoalToolPose, JointState, Pose
 
-from .config import FLOOR, TOOL_FRAME, load_robot_config
+from .config import FLOOR, load_robot_config
 
 DEVICE = "cuda:0"
 
 
-def _tensor(values):
-    return torch.tensor([list(values)], device=DEVICE, dtype=torch.float32)
-
-
-def make_planner():
+def make_planner(arms="right"):
     """One-shot trajectory planner."""
     return MotionPlanner(MotionPlannerCfg.create(
-        robot=load_robot_config(), scene_model=FLOOR,
+        robot=load_robot_config(arms), scene_model=FLOOR,
         collision_cache={"obb": 20, "mesh": 2}))
 
 
-def make_mpc():
-    """Reactive controller for a goal that moves."""
+def make_mpc(arms="right"):
+    """Reactive controller for goals that move."""
     return ModelPredictiveControl(ModelPredictiveControlCfg.create(
-        robot=load_robot_config(), scene_model=FLOOR,
+        robot=load_robot_config(arms), scene_model=FLOOR,
         use_cuda_graph=True, optimization_dt=0.1, interpolation_steps=4,
         optimizer_collision_activation_distance=0.05,
         # The default warm-start iteration count costs ~2.4 s per solve on a
@@ -45,43 +43,53 @@ def make_mpc():
 
 def home_state(solver):
     """The solver's default configuration as a JointState with zero derivatives."""
-    state = JointState.from_position(
-        solver.default_joint_state.position.unsqueeze(0)
-        if hasattr(solver, "default_joint_state")
-        else solver.default_joint_position.clone().unsqueeze(0),
-        joint_names=solver.joint_names)
+    position = (solver.default_joint_state.position.unsqueeze(0)
+                if hasattr(solver, "default_joint_state")
+                else solver.default_joint_position.clone().unsqueeze(0))
+    state = JointState.from_position(position, joint_names=solver.joint_names)
     state.velocity = torch.zeros_like(state.position)
     state.acceleration = torch.zeros_like(state.position)
     return state
 
 
-def tool_pose(solver, state):
-    """Tool frame position and quaternion (numpy) for a joint state."""
-    pose = solver.compute_kinematics(state).tool_poses.to_dict()[TOOL_FRAME]
-    return (pose.position.flatten().cpu().numpy(),
-            pose.quaternion.flatten().cpu().numpy())
+def tool_poses(solver, state):
+    """{tool frame: (position, quaternion)} as numpy, for a joint state."""
+    poses = solver.compute_kinematics(state).tool_poses.to_dict()
+    return {frame: (poses[frame].position.flatten().cpu().numpy(),
+                    poses[frame].quaternion.flatten().cpu().numpy())
+            for frame in solver.tool_frames}
 
 
-def tool_pose_at(planner, joint_names, q):
-    """Tool pose for one raw waypoint, in the plan's joint ordering."""
+def tool_positions(solver, state):
+    """{tool frame: position} as numpy, for a joint state."""
+    return {frame: pose[0] for frame, pose in tool_poses(solver, state).items()}
+
+
+def tool_poses_at(planner, joint_names, q):
+    """Tool poses for one raw waypoint, in the plan's joint ordering."""
     state = JointState.from_position(
         torch.as_tensor(np.asarray([q]), device=DEVICE, dtype=torch.float32),
         joint_names=list(joint_names))
-    return tool_pose(planner, planner.kinematics.get_active_js(state))
+    return tool_poses(planner, planner.kinematics.get_active_js(state))
 
 
-def plan_to(planner, position, quaternion, start, attempts=20):
-    """Plan a trajectory to a tool pose. Returns (joint_names, waypoints) or None.
+def plan_to(planner, targets, orientations, start, attempts=20):
+    """Plan a trajectory to one tool pose per frame.
+
+    `targets` and `orientations` are keyed by tool frame. Returns
+    (joint_names, waypoints) or None.
 
     The interpolated plan carries every joint, including the locked ones, in a
     different order from `planner.joint_names` -- pass it through
     `planner.kinematics.get_active_js` before any forward kinematics.
     """
-    goal = GoalToolPose(
-        tool_frames=planner.tool_frames,
-        # [batch, horizon, link, goalset, dim]
-        position=torch.tensor([[[[list(position)]]]], device=DEVICE, dtype=torch.float32),
-        quaternion=torch.tensor([[[[list(quaternion)]]]], device=DEVICE, dtype=torch.float32))
+    frames = planner.tool_frames
+    # [batch, horizon, link, goalset, dim]
+    position = torch.tensor([[[[list(targets[f])] for f in frames]]],
+                            device=DEVICE, dtype=torch.float32)
+    quaternion = torch.tensor([[[[list(orientations[f])] for f in frames]]],
+                              device=DEVICE, dtype=torch.float32)
+    goal = GoalToolPose(tool_frames=frames, position=position, quaternion=quaternion)
     result = planner.plan_pose(goal, start, max_attempts=attempts, enable_graph_attempt=1)
     if result is None or not result.success.any():
         return None
@@ -90,12 +98,16 @@ def plan_to(planner, position, quaternion, start, attempts=20):
     return list(plan.joint_names), waypoints
 
 
-def set_mpc_goal(mpc, position, quaternion):
-    """Point the controller at a new tool pose."""
-    pose = Pose(position=_tensor(position), quaternion=_tensor(quaternion))
+def set_mpc_goal(mpc, targets, orientations):
+    """Point the controller at one tool pose per frame."""
+    poses = {
+        frame: Pose(
+            position=torch.tensor([list(targets[frame])], device=DEVICE, dtype=torch.float32),
+            quaternion=torch.tensor([list(orientations[frame])], device=DEVICE,
+                                    dtype=torch.float32))
+        for frame in mpc.tool_frames}
     mpc.update_goal_tool_poses(
-        GoalToolPose.from_poses({TOOL_FRAME: pose},
-                                ordered_tool_frames=mpc.tool_frames, num_goalset=1),
+        GoalToolPose.from_poses(poses, ordered_tool_frames=mpc.tool_frames, num_goalset=1),
         run_ik=False)
 
 
