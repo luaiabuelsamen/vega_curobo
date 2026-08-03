@@ -1,0 +1,7 @@
+# cuRoboV2 is NOT here: it is not on PyPI and must be built separately.
+# Everything below covers the simulation and rendering side.
+mujoco>=3.9
+numpy
+pyyaml
+imageio[ffmpeg]
+torch          # cuRobo brings its own CUDA build; listed for the demos' tensors
