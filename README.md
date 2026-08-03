@@ -12,6 +12,7 @@ is no second robot model to keep in sync.
 | [`follow_ball.py`](scripts/follow_ball.py) | chasing a goal that keeps moving, one arm or two |
 | [`pick_mustard.py`](scripts/pick_mustard.py) | pick an object off a table, set it down elsewhere |
 | [`track_gic.py`](scripts/track_gic.py) | *executing* a plan with torques, under gravity |
+| [`compliance.py`](scripts/compliance.py) | what stiff and compliant control do when they hit something |
 
 ## Quick start
 
@@ -22,6 +23,7 @@ python scripts/reach.py --mode frames                 # -> media/reach.mp4
 python scripts/follow_ball.py --arms both --balls 4
 python scripts/pick_mustard.py --mode frames
 python scripts/track_gic.py --mode frames
+python scripts/compliance.py && python scripts/plot_compliance.py
 ```
 
 `--mode frames` renders offscreen through EGL to an mp4; `--mode live` opens a
@@ -77,6 +79,28 @@ contact task gets built on.
 
 Control law from Seo et al., [arXiv:2504.17080](https://arxiv.org/abs/2504.17080)
 ([GUFIC_mujoco](https://github.com/Joohwan-Seo/GUFIC_mujoco)).
+
+### Why bother
+
+![stiff versus compliant](media/compliance.gif)
+
+`compliance.py` puts a wall in the arm's path *after* planning, so neither
+controller knows it is there, and runs the identical trajectory twice.
+
+![contact force and joint torque](media/compliance_force.png)
+
+| after contact | stiff | compliant |
+|---|---|---|
+| sustained force on the wall | 242 N | 143 N |
+| mean joint torque | 786 N·m | 109 N·m |
+
+Impedance control does **not** soften the impact — the peak is 318 N against
+298 N, set by approach speed and inertia, not by the controller. What it changes
+is everything after: the stiff controller's error is in joint space, so being
+blocked just grows the correction and it leans on the wall at 786 N·m
+indefinitely. The impedance controller's error is a spatial spring, so the force
+is bounded by how far it has been pushed and it settles at a seventh of the
+torque.
 
 ## Layout
 

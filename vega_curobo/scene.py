@@ -49,7 +49,8 @@ def _tool_quaternion():
     return quat
 
 
-def build_scene(markers=None, table=None, meshes=None, physics=False):
+def build_scene(markers=None, table=None, meshes=None, physics=False,
+                obstacles=None, supports=None):
     """Compile the Vega with a ground plane, lights, markers and a framed camera.
 
     `markers` maps a name (use the tool frame) to a position; each becomes a
@@ -59,6 +60,15 @@ def build_scene(markers=None, table=None, meshes=None, physics=False):
     `table` is a (centre, half_extents) pair. `meshes` maps a name to
     (obj_path, position, rgba) and each becomes a mocap body, so a demo can carry
     an object around by writing its pose rather than simulating a grip.
+
+    `supports` maps a name to (position, half_extents) and each becomes a static
+    collidable box -- a pedestal for an obstacle to rest on, since a free body
+    with nothing under it simply falls out of the scene before the arm arrives.
+
+    `obstacles` maps a name to (position, half_extents, mass) and each becomes a
+    *collidable, free-floating* box. Everything else this function adds is
+    contype=0 decoration; these are the only props the robot can actually hit,
+    which is the point when the demo is about what happens on contact.
 
     Kinematic by default: gravity is off and the demos write joint angles
     straight into qpos, because what is being shown is the solver's output, not
@@ -102,6 +112,17 @@ def build_scene(markers=None, table=None, meshes=None, physics=False):
         body = world.add_body(name=f"object_{name}", pos=list(position), mocap=True)
         body.add_geom(type=mujoco.mjtGeom.mjGEOM_MESH, meshname=name, rgba=list(rgba),
                       contype=0, conaffinity=0)
+
+    for name, (position, half) in (supports or {}).items():
+        world.add_geom(name=f"support_{name}", type=mujoco.mjtGeom.mjGEOM_BOX,
+                       pos=list(position), size=list(half), rgba=[0.45, 0.45, 0.5, 1])
+
+    for name, (position, half, mass) in (obstacles or {}).items():
+        body = world.add_body(name=f"obstacle_{name}", pos=list(position))
+        body.add_freejoint()
+        body.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=list(half),
+                      rgba=[0.85, 0.30, 0.25, 1], mass=mass,
+                      friction=[1.0, 0.005, 0.0001])
 
     if markers is None:
         markers = {"R_ee": (0.72, -0.15, 1.05)}

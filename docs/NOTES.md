@@ -169,3 +169,19 @@ for _ in range(1500): mujoco.mj_step(m, d)
 cuRobo and MuJoCo agree the range is [0, 0.4] and `jnt_limited` is set, so this
 is something about the imported model rather than a disagreement between the two.
 Worth knowing before trusting sim contact forces near that joint.
+
+**Peak contact force is not a compliance metric.** It is set by approach speed
+and arm inertia, so stiff and compliant land within 7% of each other (318 N and
+298 N). The difference is in the sustained phase: 242 N against 143 N on the
+wall, and 786 N·m against 109 N·m of joint torque. Quote the sustained numbers.
+
+**A light obstacle measures nothing.** The first version of this test used a
+0.4 kg block on a pedestal; both controllers simply launched it (174 cm and
+184 cm) and the compliant run recorded the *higher* peak force. Against
+something immovable the comparison is about what the controller does when it
+cannot proceed, which is the actual question.
+
+**Separate the startup transient from contact.** The stiff run peaks at
+1138 N·m at t=0.5 s, well before contact at t=2.3 s -- that is the PD catching
+the start of the trajectory, not the wall. Reporting it as a contact number
+overstates the result by 45%.
