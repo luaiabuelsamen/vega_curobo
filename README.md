@@ -13,6 +13,7 @@ Three demos:
 | `scripts/reach.py` | `MotionPlanner` | ~12 s | ~125 s | one collision-free trajectory to a fixed pose |
 | `scripts/follow_ball.py` | `ModelPredictiveControl` | ~0.3 s | ~0.9 s | servo toward a goal that keeps moving |
 | `scripts/pick_mustard.py` | `MotionPlanner` | 6 segments | — | pick an object off a table and set it down elsewhere |
+| `scripts/track_gic.py` | `MotionPlanner` + impedance control | 2 ms loop | — | *execute* a plan with torques, under gravity |
 
 That difference is the whole reason both exist. A global planner produces a
 better trajectory but cannot chase anything at 12 seconds a solve; MPC re-solves
@@ -52,6 +53,7 @@ python scripts/reach.py --arms both --mode frames       # both hands, mirrored t
 python scripts/follow_ball.py --arms both --balls 4     # a ball per hand
 
 python scripts/pick_mustard.py --mode frames            # -> media/pick_mustard.mp4
+python scripts/track_gic.py --mode frames               # -> media/track_gic.mp4
 ```
 
 `--mode frames` renders offscreen through EGL and writes an mp4. Prefer it on
@@ -68,6 +70,7 @@ vega_curobo/config.py     paths, tool frame, reachable box, floor obstacle
 vega_curobo/scene.py      MuJoCo scene, lights, camera, mp4/window recording
 vega_curobo/solvers.py    planner and MPC construction, goals, stepping, attachment
 vega_curobo/grasp.py      grasp poses from the measured jaw offset, feasibility search
+vega_curobo/control.py    geometric impedance control on SE(3), trajectory resampling
 scripts/build_config.py   regenerate the robot config from a URDF (~8 min sphere fit)
 scripts/relax_self_collision.py  ignore link pairs that overlap at rest
 ```
@@ -144,6 +147,77 @@ right-hand ball at y=+0.048. The per-hand boxes were each validated against the
 arm and the shared torso in the same optimisation it settles into a local
 minimum instead of reaching across. Raise `--patience`, or keep each hand on its
 own side.
+
+## Executing a plan
+
+Everything above writes joint angles into qpos, which is a way of saying "assume
+a controller". `track_gic.py` runs one: cuRobo plans, and torques computed from
+the SE(3) tracking error drive the arm along the trajectory with gravity on.
+
+The control law is the geometric impedance controller of Seo et al.,
+[arXiv:2504.17080](https://arxiv.org/abs/2504.17080)
+([GUFIC_mujoco](https://github.com/Joohwan-Seo/GUFIC_mujoco)), which is
+formulated on SE(3) rather than on a naive pose difference. Measured here:
+
+| | |
+|---|---|
+| holding a pose | 0.26 mm |
+| tracking a planned trajectory | 8.7 mm mean, 26.7 mm max |
+| after settling | 24.3 mm |
+
+The point is compliance, not accuracy — a position servo would beat those
+numbers and then fight the first thing it touched. This is the layer a
+force-regulated contact task would be built on.
+
+**A URDF gives you nothing to command.** It imports with zero actuators and zero
+sensors. `build_scene(physics=True)` adds a torque motor per joint, a site at
+the tool frame, and gravity.
+
+**The tool frame needs a site, not a body.** `R_ee` is merged away by the
+compiler, and `mj_jacSite` needs something that exists to hang a Jacobian on.
+The site is placed at the same two fixed transforms and agrees with cuRobo's
+tool position exactly.
+
+**Torque control needs armature this URDF does not have.** Armature and damping
+are zero throughout and some links have diagonal inertias down to 2e-5. On that
+model even *exact gravity compensation* — which should leave the arm at rest —
+diverged to |qvel| = 160. Adding armature (0.1 arm, 0.01 fingers) and damping
+1.0 brings the same test to |qvel| = 0.14. Armature is reflected motor and gear
+inertia: physically real, missing from the URDF, and it does not move where the
+arm settles.
+
+**Joints you are not driving still need gravity compensation.** PD alone lets the
+left arm sag under its own weight, and because it hangs off the same torso lift
+as the right arm, that sag is a large disturbance on exactly the joints the
+impedance controller is regulating.
+
+**The nullspace term is off by default, and the experiment says why.** The chain
+is 9 joints for a 6-dimensional task, so `J^T` leaves three directions
+uncommanded and the elbow wanders. A posture spring projected into the nullspace
+should fix that. It does not pay: at gains that meaningfully reduce the drift
+(1.85 rad to 1.40 rad) the tool error goes from 0.26 mm to 67 mm. Neither
+projector choice helps — note that `I - J^+ J` and `I - J^T (J^T)^+` are the
+same orthogonal projector, and Khatib's inertia-weighted one behaves the same
+here. Stiffening the joints that are merely held changes nothing either
+(400 to 50000 moves the error by 0.5 mm). Left in behind `--posture`, off by
+default, as an honest negative result rather than a knob that looks like it works.
+
+**The prismatic `Lift` joint does not respect its limit, and the controller is
+not why.** It ends about 9 cm past its 0.4 m upper bound. With no controller, no
+actuators, no gravity and no edits to the model, starting it at 0.30 still
+leaves it at 0.4900:
+
+```python
+m = mujoco.MjModel.from_xml_path("assets/vega.urdf")
+m.opt.gravity[:] = [0, 0, 0]
+d = mujoco.MjData(m); d.qpos[m.joint("Lift").qposadr[0]] = 0.30
+for _ in range(1500): mujoco.mj_step(m, d)
+# -> 0.4900, against a declared range of [0, 0.4]
+```
+
+cuRobo and MuJoCo agree the range is [0, 0.4] and `jnt_limited` is set, so this
+is something about the imported model rather than a disagreement between the two.
+Worth knowing before trusting sim contact forces near that joint.
 
 ## Grasping
 

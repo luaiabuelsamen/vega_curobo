@@ -13,6 +13,15 @@ from .config import URDF
 
 WIDTH, HEIGHT = 1280, 720
 
+#: Site standing in for the cuRobo tool frame. `R_ee` is a massless fixed link
+#: that the compiler merges away, so it cannot be queried in MuJoCo -- but a
+#: site placed at the same transform can, and unlike a body it also gives
+#: `mj_jacSite` something to hang a Jacobian on.
+TOOL_SITE = "tool"
+TOOL_PARENT = "R_arm_l7"
+TOOL_OFFSET = (0.11597, 0.0, -0.032)      # R_arm_j8, then R_ee_j0's yaw
+TOOL_RPY = (0.0, 1.57079, 1.57079)
+
 
 def look_at(eye, target):
     """xyaxes for a camera at `eye` aimed at `target` (MuJoCo looks down -z)."""
@@ -28,7 +37,19 @@ def look_at(eye, target):
 MARKER_COLOURS = {"R_ee": (0.15, 0.80, 0.30, 0.9), "L_ee": (0.95, 0.55, 0.15, 0.9)}
 
 
-def build_scene(markers=None, table=None, meshes=None):
+def _tool_quaternion():
+    """Quaternion for Ry then Rz, the two fixed rotations between R_arm_l7 and R_ee."""
+    _, pitch, yaw = TOOL_RPY
+    cy, sy = np.cos(pitch), np.sin(pitch)
+    cz, sz = np.cos(yaw), np.sin(yaw)
+    R = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]]) @ \
+        np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+    quat = np.zeros(4)
+    mujoco.mju_mat2Quat(quat, R.reshape(-1))
+    return quat
+
+
+def build_scene(markers=None, table=None, meshes=None, physics=False):
     """Compile the Vega with a ground plane, lights, markers and a framed camera.
 
     `markers` maps a name (use the tool frame) to a position; each becomes a
@@ -39,8 +60,13 @@ def build_scene(markers=None, table=None, meshes=None):
     (obj_path, position, rgba) and each becomes a mocap body, so a demo can carry
     an object around by writing its pose rather than simulating a grip.
 
-    Kinematic only: gravity is off and the demos write joint angles straight into
-    qpos, because what is being shown is the solver's output, not contact physics.
+    Kinematic by default: gravity is off and the demos write joint angles
+    straight into qpos, because what is being shown is the solver's output, not
+    contact physics.
+
+    `physics=True` turns gravity on and adds a torque actuator per joint plus the
+    tool site, which is what an actual controller needs. A URDF imports with no
+    actuators and no sensors at all, so without this there is nothing to command.
     """
     spec = mujoco.MjSpec.from_file(URDF)
 
@@ -84,6 +110,33 @@ def build_scene(markers=None, table=None, meshes=None):
         body.add_geom(type=mujoco.mjtGeom.mjGEOM_SPHERE, size=[0.045, 0, 0],
                       rgba=list(MARKER_COLOURS.get(name, (0.15, 0.8, 0.3, 0.9))),
                       contype=0, conaffinity=0)
+
+    if physics:
+        spec.option.gravity = [0, 0, -9.81]
+        # The URDF specifies no armature and no damping anywhere, and some links
+        # have diagonal inertias down to 2e-5. Torque control on that is
+        # numerically marginal: even exact gravity compensation, which should
+        # leave the arm at rest, diverges. Armature is reflected motor and gear
+        # inertia -- physically real, absent from the URDF, and it does not
+        # change where the arm settles.
+        for joint in spec.joints:
+            if joint.type == mujoco.mjtJoint.mjJNT_FREE:
+                continue
+            finger = "gripper" in joint.name
+            joint.armature = 0.01 if finger else 0.1
+            joint.damping = [0.5, 0.0, 0.0] if finger else [1.0, 0.0, 0.0]
+        parent = spec.body(TOOL_PARENT)
+        parent.add_site(name=TOOL_SITE, pos=list(TOOL_OFFSET),
+                        quat=list(_tool_quaternion()), size=[0.01, 0, 0],
+                        rgba=[0.9, 0.2, 0.2, 0.0])
+        for joint in spec.joints:
+            if joint.type == mujoco.mjtJoint.mjJNT_FREE:
+                continue
+            spec.add_actuator(name=f"{joint.name}_motor", target=joint.name,
+                              trntype=mujoco.mjtTrn.mjTRN_JOINT,
+                              gear=[1, 0, 0, 0, 0, 0],
+                              ctrllimited=False, ctrlrange=[-1e6, 1e6],
+                              forcelimited=False, forcerange=[-1e6, 1e6])
 
     eye = [1.9, -1.5, 1.55]
     world.add_camera(name="demo", pos=eye, fovy=50, xyaxes=look_at(eye, [0.35, -0.05, 1.05]))
