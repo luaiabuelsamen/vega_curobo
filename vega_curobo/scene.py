@@ -28,12 +28,16 @@ def look_at(eye, target):
 MARKER_COLOURS = {"R_ee": (0.15, 0.80, 0.30, 0.9), "L_ee": (0.95, 0.55, 0.15, 0.9)}
 
 
-def build_scene(markers=None):
+def build_scene(markers=None, table=None, meshes=None):
     """Compile the Vega with a ground plane, lights, markers and a framed camera.
 
     `markers` maps a name (use the tool frame) to a position; each becomes a
     mocap body you can move with `set_marker`. Defaults to a single right-hand
     marker.
+
+    `table` is a (centre, half_extents) pair. `meshes` maps a name to
+    (obj_path, position, rgba) and each becomes a mocap body, so a demo can carry
+    an object around by writing its pose rather than simulating a grip.
 
     Kinematic only: gravity is off and the demos write joint angles straight into
     qpos, because what is being shown is the solver's output, not contact physics.
@@ -62,6 +66,17 @@ def build_scene(markers=None):
     world.add_geom(type=mujoco.mjtGeom.mjGEOM_PLANE, size=[3, 3, 0.05],
                    rgba=[0.82, 0.84, 0.87, 1], contype=0, conaffinity=0)
 
+    if table is not None:
+        centre, half = table
+        world.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=list(centre), size=list(half),
+                       rgba=[0.55, 0.42, 0.30, 1], contype=0, conaffinity=0)
+
+    for name, (path, position, rgba) in (meshes or {}).items():
+        spec.add_mesh(name=name, file=path)
+        body = world.add_body(name=f"object_{name}", pos=list(position), mocap=True)
+        body.add_geom(type=mujoco.mjtGeom.mjGEOM_MESH, meshname=name, rgba=list(rgba),
+                      contype=0, conaffinity=0)
+
     if markers is None:
         markers = {"R_ee": (0.72, -0.15, 1.05)}
     for name, position in markers.items():
@@ -79,6 +94,20 @@ def set_marker(model, data, name, position):
     """Move one marker. Mocap bodies index into `mocap_pos` by mocapid, which is
     not the body id."""
     data.mocap_pos[model.body(f"marker_{name}").mocapid[0]] = position
+
+
+def set_object(model, data, name, position, quaternion=None):
+    """Move a mesh object placed by `build_scene(meshes=...)`.
+
+    Poses are in the frame the mesh file was authored in. The compiler does
+    re-frame mesh assets onto their principal axes of inertia -- `mesh_quat` is
+    nowhere near identity for an asymmetric object -- but it compensates on the
+    geom, so no correction belongs here. Applying one rotates the object twice.
+    """
+    index = model.body(f"object_{name}").mocapid[0]
+    data.mocap_pos[index] = position
+    if quaternion is not None:
+        data.mocap_quat[index] = quaternion
 
 
 def joint_writer(model, data, joint_names):

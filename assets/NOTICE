@@ -10,4 +10,13 @@ Modified for this repo:
   - zero velocity and effort limits clamped to positive values, which cuRobo
     requires
 
+objects/mustard.obj is the 006_mustard_bottle model from the YCB Object and
+Model Set
+
+    https://www.ycbbenchmarks.com
+    Calli et al., "The YCB object and model set", ICAR 2015
+
+redistributed here as geometry only (the source texture map is not included;
+the demo renders it in flat colour).
+
 The rest of this repository is MIT licensed; see ../LICENSE.

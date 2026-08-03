@@ -15,16 +15,63 @@ from curobo.model_predictive_control import ModelPredictiveControl, ModelPredict
 from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
 from curobo.types import GoalToolPose, JointState, Pose
 
-from .config import FLOOR, load_robot_config
+from .config import FLOOR, LEFT_TOOL, RIGHT_TOOL, load_robot_config
 
 DEVICE = "cuda:0"
 
 
-def make_planner(arms="right"):
-    """One-shot trajectory planner."""
+def make_planner(arms="right", world=None, attachable=False, use_cuda_graph=True):
+    """One-shot trajectory planner.
+
+    `world` replaces the default floor-only scene. `attachable` adds the
+    `attached_object` link the config is generated without, which is what the
+    attachment managers hang carried objects off; without it `attach` has
+    nowhere to put the object's spheres.
+
+    Set `use_cuda_graph=False` if you mix bare IK queries and full plans on one
+    planner. The solver captures a CUDA graph at the first problem shape it
+    sees, and a later call with a different shape raises "CUDA graph reset is
+    not available" rather than recapturing. Querying IK for grasp feasibility
+    and then planning is exactly that pattern.
+    """
+    config = load_robot_config(arms)
+    if attachable:
+        add_attachment_link(config)
     return MotionPlanner(MotionPlannerCfg.create(
-        robot=load_robot_config(arms), scene_model=FLOOR,
+        robot=config, scene_model=world or FLOOR, use_cuda_graph=use_cuda_graph,
         collision_cache={"obb": 20, "mesh": 2}))
+
+
+def add_attachment_link(config, tool_frame=RIGHT_TOOL, num_spheres=64):
+    """Give the config somewhere to put a carried object.
+
+    `add_object_link: True` alone is not enough -- the attachment managers look
+    up a link literally named `attached_object` and raise KeyError without it.
+    It has to be declared as an extra link fixed to the tool frame, with a pool
+    of empty sphere slots the manager fills when it fits the payload, and it
+    must ignore self-collision against the hand that is holding it.
+    """
+    kinematics = config["kinematics"]
+    link = "attached_object"
+    if link in kinematics["collision_link_names"]:
+        return config
+    hand = [name for name in kinematics["collision_link_names"]
+            if name.startswith(tool_frame[0] + "_gripper")
+            or name in (f"{tool_frame[0]}_arm_l7", f"{tool_frame[0]}_arm_l8")]
+
+    kinematics["add_object_link"] = True
+    kinematics["collision_link_names"] = kinematics["collision_link_names"] + [link]
+    kinematics["extra_collision_spheres"] = {link: num_spheres}
+    kinematics["extra_links"] = {link: {
+        "fixed_transform": [0, 0, 0, 1, 0, 0, 0],
+        "joint_name": "attach_joint",
+        "joint_type": "FIXED",
+        "link_name": link,
+        "parent_link_name": tool_frame,
+    }}
+    kinematics.setdefault("self_collision_ignore", {})[link] = hand
+    kinematics.setdefault("self_collision_buffer", {})[link] = 0.0
+    return config
 
 
 def make_mpc(arms="right"):
@@ -123,3 +170,45 @@ def step_mpc(mpc, state):
     nxt.velocity = sequence.velocity[:, -1, :]
     nxt.acceleration = sequence.acceleration[:, -1, :]
     return nxt, sequence.position[0].detach().cpu().numpy()
+
+
+# --------------------------------------------------------------- world editing
+def _cores(planner):
+    """Both solver cores. They carry independent copies of the collision world,
+    so anything that changes it has to be applied to each."""
+    cores = []
+    for name in ("ik_solver", "trajopt_solver", "graph_planner"):
+        core = getattr(getattr(planner, name, None), "core", None)
+        if core is not None:
+            cores.append(core)
+    return cores
+
+
+def set_obstacle_enabled(planner, name, enabled):
+    """Toggle one world obstacle.
+
+    Grasping needs this: with the object still a world obstacle, the fingers
+    closing around it read as a collision and no plan exists. Same for the
+    surface it rests on once the object is attached and its spheres touch it.
+    """
+    for core in _cores(planner):
+        checker = getattr(core, "scene_collision_checker", None)
+        if checker is not None:
+            checker.enable_obstacle(name, enable=enabled)
+
+
+def attach_object(planner, state, names, num_spheres=None):
+    """Make world objects part of the robot, so plans account for what it carries."""
+    for core in _cores(planner):
+        manager = getattr(core, "attachment_manager", None)
+        if manager is not None:
+            manager.attach_from_scene(state, obstacle_names=list(names),
+                                      num_spheres=num_spheres)
+
+
+def detach_object(planner, names=None):
+    """Release carried objects, optionally re-enabling them as world obstacles."""
+    for core in _cores(planner):
+        manager = getattr(core, "attachment_manager", None)
+        if manager is not None:
+            manager.detach(enable_obstacle_names=list(names) if names else None)

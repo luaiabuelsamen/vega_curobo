@@ -6,12 +6,13 @@ simulator load the same URDF, so there is no second robot model to keep in sync.
 
 ![bimanual ball following](media/follow_ball_bimanual.gif)
 
-Two demos, one for each half of the problem, each running on one arm or both:
+Three demos:
 
 | | solver | one arm | both arms | use |
 |---|---|---|---|---|
 | `scripts/reach.py` | `MotionPlanner` | ~12 s | ~125 s | one collision-free trajectory to a fixed pose |
 | `scripts/follow_ball.py` | `ModelPredictiveControl` | ~0.3 s | ~0.9 s | servo toward a goal that keeps moving |
+| `scripts/pick_mustard.py` | `MotionPlanner` | 6 segments | — | pick an object off a table and set it down elsewhere |
 
 That difference is the whole reason both exist. A global planner produces a
 better trajectory but cannot chase anything at 12 seconds a solve; MPC re-solves
@@ -49,6 +50,8 @@ python scripts/follow_ball.py --mode live
 
 python scripts/reach.py --arms both --mode frames       # both hands, mirrored target
 python scripts/follow_ball.py --arms both --balls 4     # a ball per hand
+
+python scripts/pick_mustard.py --mode frames            # -> media/pick_mustard.mp4
 ```
 
 `--mode frames` renders offscreen through EGL and writes an mp4. Prefer it on
@@ -63,7 +66,8 @@ assets/meshes/            33 collision meshes
 configs/vega_right.yml    generated cuRobo config: spheres, self-collision, locked joints
 vega_curobo/config.py     paths, tool frame, reachable box, floor obstacle
 vega_curobo/scene.py      MuJoCo scene, lights, camera, mp4/window recording
-vega_curobo/solvers.py    planner and MPC construction, goals, stepping
+vega_curobo/solvers.py    planner and MPC construction, goals, stepping, attachment
+vega_curobo/grasp.py      grasp poses from the measured jaw offset, feasibility search
 scripts/build_config.py   regenerate the robot config from a URDF (~8 min sphere fit)
 scripts/relax_self_collision.py  ignore link pairs that overlap at rest
 ```
@@ -140,6 +144,57 @@ right-hand ball at y=+0.048. The per-hand boxes were each validated against the
 arm and the shared torso in the same optimisation it settles into a local
 minimum instead of reaching across. Raise `--patience`, or keep each hand on its
 own side.
+
+## Grasping
+
+`pick_mustard.py` is the pick-and-place: approach, grasp, lift, carry, place,
+retract. Nothing in it is a typed-in waypoint. The approach direction is
+searched for, the tool goal comes from the gripper geometry, and the bottle is
+attached to the robot for the carry so the plan accounts for what it is holding.
+
+![pick and place](media/pick_mustard.gif)
+
+**The tool frame is not where the fingers are.** `R_ee` is at the wrist mount and
+the jaw midpoint is 15.3 cm further along the tool's local +z, with the jaws
+closing along local x. Both numbers came from measuring the gripper's geometry
+at its joint limits, not from the URDF or a guess. Planning straight to an
+object's position drives the wrist into it.
+
+**Grasp feasibility has to be checked with the object disabled.** At the grasp
+pose the jaws surround the bottle, so while it is still a world obstacle every
+candidate approach fails IK on collision. Leave it enabled during the search and
+you get "no reachable grasp" while every pre-grasp pose passes, which reads as an
+unreachable object rather than a bookkeeping mistake.
+
+**Check the whole manoeuvre, not just the grasp.** The gripper holds one
+orientation from approach to release, so an orientation that works at the grasp
+is worth nothing if it fails at the place. Searching on the grasp alone picked
+yaw=-45 here, which planned three segments and then had no solution at the
+transport pose. The demo defines the sequence once and the search runs over all
+six poses; 21 of the 39 candidate orientations satisfy all of them.
+
+**Attaching a payload needs a link that does not exist yet.** Setting
+`add_object_link: True` is not enough: the attachment managers look up a link
+literally named `attached_object` and raise `KeyError` without it. It has to be
+declared as an extra link fixed to the tool frame, with a pool of empty sphere
+slots and self-collision ignored against the hand. The pool must be at least as
+large as the fit -- a box-shaped payload wanted 34 spheres against a 32-slot
+allocation and the attach raised rather than fitting fewer. Both solver cores
+hold their own copy, so attach, detach and obstacle toggles apply to each.
+
+**CUDA graphs and mixed problem shapes do not combine.** The solver captures a
+graph at the first problem shape it sees; a later call with a different shape
+raises "CUDA graph reset is not available" instead of recapturing. Querying IK
+for grasp feasibility and then planning is exactly that pattern, so this demo
+builds its planner with `use_cuda_graph=False`.
+
+**One of the YCB collision hulls renders wrong.** `006_mustard_bottle/collision.obj`
+reports the right vertex extents, and MuJoCo agrees on those extents, but it
+draws about half size: measured against a box of identical stated dimensions at
+matched depth, 47 px against 119 px. `textured_simple.obj` renders correctly
+(116 px against 119, right for a tapering bottle) and is what this repo ships.
+Worth knowing that a mesh's vertex data and what MuJoCo draws can disagree; a
+segmentation render against a known-size primitive is the way to settle it.
 
 **Interpolated plans use a different joint ordering.** `get_interpolated_plan()`
 returns all 21 joints, including locked ones, ordered differently from
