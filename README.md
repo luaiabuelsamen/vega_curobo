@@ -121,4 +121,7 @@ before any forward kinematics, or it raises on the joint-name mismatch.
 
 ## License
 
-MIT
+MIT, except the robot assets. `assets/` is redistributed from
+[dexmate-ai/dexmate-urdf](https://github.com/dexmate-ai/dexmate-urdf),
+Copyright 2025 Dexmate Inc., under the Apache License 2.0. See `assets/NOTICE`
+for the modifications made here.

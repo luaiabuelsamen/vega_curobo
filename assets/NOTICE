@@ -1,0 +1,13 @@
+The Vega URDF and meshes in this directory come from
+
+    https://github.com/dexmate-ai/dexmate-urdf
+    Copyright 2025 Dexmate Inc., Apache License 2.0 (see LICENSE-dexmate)
+
+Modified for this repo:
+  - mesh filenames rewritten to paths relative to vega.urdf, meshes flattened
+    into meshes/
+  - stale "/obj/" path segments resolved against the filesystem
+  - zero velocity and effort limits clamped to positive values, which cuRobo
+    requires
+
+The rest of this repository is MIT licensed; see ../LICENSE.
